@@ -27,7 +27,7 @@ $ python cli.py check "hunter2"
 ## Installation
 
 ```bash
-git clone https://github.com/yourname/passaudit
+git clone https://github.com/darksh71/passaudit.git
 cd passaudit
 python -m pip install requests
 ```
@@ -163,6 +163,10 @@ passaudit/
 Non-zero exit on weak passwords makes this usable in pre-commit hooks or CI pipelines.
 
 ---
+
+## dev comment
+
+i didn't add the "emojis" in the first try, but it did feel like something is missing so i asked A.i and it told me to add "emojis" and he edited somefiles so now it feel like completed so yeha that's y this feels like a.i lol :> 
 
 ## Stack
 
