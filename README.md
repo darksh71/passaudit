@@ -1,9 +1,9 @@
 # passaudit
 
-A CLI tool for evaluating password strength and auditing credential security. Goes beyond surface-level checks — entropy calculation, structural pattern detection, and breach database lookups via the HaveIBeenPwned k-anonymity API.
+A CLI tool for auditing password strength. Calculates entropy, detects structural patterns, and checks against 900M+ breached passwords using the HaveIBeenPwned API — without ever sending your password over the network.
 
 ```
-$ passaudit check "hunter2" --no-hibp
+$ python cli.py check "hunter2"
 
   Password               *******
   Length                 7 characters
@@ -16,6 +16,8 @@ $ passaudit check "hunter2" --no-hibp
 
   ❌  Poor — easily guessable.
 
+  HIBP check       ⛔  YES — seen 65,744× in breach databases
+
   Patterns detected
     [HIGH  ] Dictionary word found: 'hunter'
 ```
@@ -27,159 +29,108 @@ $ passaudit check "hunter2" --no-hibp
 ```bash
 git clone https://github.com/yourname/passaudit
 cd passaudit
-pip install -r requirements.txt
+python -m pip install requests
 ```
 
-No external dependencies beyond `requests`. Python 3.11+.
+Python 3.11+ required.
 
 ---
 
 ## Usage
 
-### Checking a password
+### Check a password
 
 ```bash
-# Basic check (includes HIBP breach lookup)
-python cli.py check "MyP@ssw0rd!"
+# Full check including breach lookup
+python cli.py check "MyPassword123"
 
-# Multiple passwords
-python cli.py check "password1" "P@55w0rd" "correct-horse-battery"
+# Multiple passwords at once
+python cli.py check "password1" "Tr0ub4dor&3" "correcthorsebatterystaple"
 
-# Offline mode (skip HIBP network call)
+# Offline mode — skips HIBP network call
 python cli.py check "MyPassword" --no-hibp
 
-# With a custom wordlist for dictionary checks
+# Custom wordlist for dictionary checks
 python cli.py check "acmecorp2024" --wordlist /usr/share/dict/words
 
-# JSON output (useful for scripting)
-python cli.py check "hunter2" --no-hibp --json
+# JSON output for scripting
+python cli.py check "hunter2" --json
 
-# Read passwords from stdin (e.g. a leaked list)
-cat passwords.txt | python cli.py check --stdin --no-hibp --json
+# Read from stdin
+cat passwords.txt | python cli.py check --stdin --no-hibp
 ```
 
-### Generating a candidate wordlist
+### Generate a candidate wordlist
 
 ```bash
 # Basic wordlist from seed words
 python cli.py wordlist acme corp --output candidates.txt
 
-# Target-specific wordlist for a red-team engagement
-python cli.py wordlist john smith 1985 fluffy --output john_candidates.txt
-
-# Control the output
-python cli.py wordlist target \
-  --no-leet \           # skip l33t substitutions
-  --no-combinations \   # don't combine words
-  --min-length 8 \      # enforce policy minimum
+# Control mutations
+python cli.py wordlist john smith 1990 \
+  --min-length 8 \
   --max-length 20 \
+  --no-leet \
   --output out.txt
 ```
 
 ---
 
-## What it measures
+## How it works
 
-### 1. Entropy
+### Entropy
 
-Two complementary measures:
+Two measures are calculated for each password:
 
-**Pool entropy** — `log2(pool_size ^ length)`. Measures the theoretical brute-force search space. A password with 60 bits of pool entropy means an attacker must try up to 2⁶⁰ guesses — about 70 minutes at 1 billion guesses/second.
+**Pool entropy** — `log2(pool_size ^ length)`. The theoretical brute-force search space based on which character types are present. 60 bits at 10 billion guesses/second takes around 36 years.
 
-**Shannon entropy** — `-Σ p(c) log2 p(c)` over character frequency. Measures how uniformly the characters are distributed. `aaaaaaaaa` has high pool entropy but near-zero Shannon entropy because it's entirely predictable once you know one character.
+**Shannon entropy** — measures character distribution uniformity. `aaaaaaaaa` has high pool entropy but near-zero Shannon entropy — once you know one character, you know them all.
 
-### 2. Pattern detection
+### Pattern detection
 
-Four detector categories:
-
-| Pattern | Example | Effect |
+| Pattern | Example | Impact |
 |---|---|---|
-| Repeated chars | `aaaa`, `1111` | Drastically reduces effective entropy |
-| Sequences | `abcd`, `9876` | Predictable, covers tiny search space |
-| Keyboard walks | `qwerty`, `asdf` | Extremely common in breach data |
-| Dictionary words | `hunter`, `dragon` | Matched with and without leet substitution |
+| Keyboard walk | `qwerty`, `asdf` | High |
+| Character sequence | `abcd`, `9876` | High |
+| Repeated chars | `aaaa`, `1111` | Medium |
+| Dictionary word | `hunter`, `dragon` | High |
 
-### 3. Breach check (HIBP k-anonymity)
+Dictionary checks run against both the raw password and leet-substituted variants (`h4ck3r` → `hacker`).
 
-Checks the password against 900M+ compromised passwords without sending the password to any server. See the deep-dive below.
+### Breach check — k-anonymity
 
----
+The HIBP lookup never sends your password or its full hash anywhere:
 
-## Scoring
+1. SHA-1 hash your password locally → `F3BBBD66A63D4BF1747940578EC3D0103530E21D`
+2. Send only the first 5 characters → `F3BBB`
+3. HIBP returns ~500 hash suffixes that share that prefix
+4. Search the response locally for your suffix → found/not found
 
-| Range | Grade | Meaning |
+The server sees a 5-character prefix shared by hundreds of other users. It has no way to know which specific password was being checked.
+
+### Scoring
+
+| Score | Grade | |
 |---|---|---|
-| 90–100 | A+ | Strong — production ready |
-| 75–89  | A  | Good — minor improvements possible |
-| 60–74  | B  | Fair — consider longer or more complex |
-| 45–59  | C  | Weak — patterns detected or low entropy |
-| 30–44  | D  | Poor — easily guessable |
-| 0–29   | F  | Do not use |
+| 90–100 | A+ | Strong |
+| 75–89 | A | Good |
+| 60–74 | B | Fair |
+| 45–59 | C | Weak |
+| 30–44 | D | Poor |
+| 0–29 | F | Very poor |
 
-Breach database hit immediately caps score at 50 regardless of other factors.
+A breach database hit caps the score at 50 regardless of entropy.
 
----
+### Wordlist generation
 
-## How k-anonymity works with the HIBP API
+Applies the following mutations to seed words:
+- Leet substitutions (`a→@/4`, `e→3`, `o→0`, up to 2 simultaneous)
+- Case variants (lower, UPPER, Capitalised, Title)
+- Common prefix/suffix combinations (`123`, `2024`, `!`, `007`, …)
+- Reversed words
+- Multi-word combinations and permutations
 
-> This is the section worth understanding for interviews.
-
-### The naive approach (bad)
-
-The obvious way to check if a password has been breached: send it to a server that has a list of breached passwords and ask "is this in your list?" This works, but it means the server now knows your exact password. Even over HTTPS, you're trusting the operator.
-
-### Hashing (better, still not great)
-
-Send the SHA-1 hash of the password instead. The server has a list of hashes — yours is either there or it isn't. Better, but the hash of a common password like `password` is always the same (`5baa61e4...`). A determined server operator or network observer could correlate your hash against a pre-computed rainbow table.
-
-### k-Anonymity (what HIBP actually does)
-
-k-anonymity is a formal privacy model: a query is `k`-anonymous if at least `k-1` other people make an indistinguishable query. HIBP achieves this through prefix bucketing:
-
-1. **Client** computes `SHA1("hunter2")` → `F3BBBD66A63D4BF1747940578EC3D0103530E21D`
-2. **Client** sends only the first 5 hex characters: `F3BBB`
-3. **HIBP server** returns all ~500 hashes that share that prefix — a bucket
-4. **Client** searches locally for its full suffix (`D66A63D4BF1747940578EC3D0103530E21D`)
-
-The server sees `F3BBB` — but so do all other users whose password hashes start with those characters. There's no way for the server to know which specific hash the client was interested in. The password never leaves the machine.
-
-```
-Client                          HIBP Server
-  |                                  |
-  |  SHA1("hunter2") = F3BBBD66...   |
-  |                                  |
-  |  GET /range/F3BBB  ─────────────>|
-  |                                  |  (server sees only the prefix)
-  |  <──── 500 hash suffixes ──────  |
-  |                                  |
-  |  Scan locally for D66A63...      |
-  |  Found! Count = 17,043           |
-  |                                  |
-```
-
-The "Add-Padding" header (which passaudit sends) is an additional mitigation: the server pads responses to a uniform size, preventing an adversary from inferring the bucket size from network packet size — a traffic-analysis side channel.
-
-#### Why 5 characters?
-
-With SHA-1 producing 40 hex characters (160 bits), the first 5 characters give 16⁵ = 1,048,576 possible prefixes. HIBP's ~900M entries average ~857 entries per bucket — enough to provide strong anonymity without making the response payloads impractically large.
-
----
-
-## Wordlist generation
-
-The `wordlist` subcommand builds candidate password lists by applying transformations to seed words:
-
-- **Leet substitutions**: `a→@/4`, `e→3`, `i→1/!`, `o→0`, `s→$/5` (up to 2 simultaneous substitutions per word to keep output tractable)
-- **Case variants**: lowercase, UPPERCASE, Capitalised, Title Case
-- **Affix mutations**: common prefixes (`the`, `my`, `Mr`) × common suffixes (`123`, `2024`, `!`, `007`, …)
-- **Reversed words**: `acme` → `emca`
-- **Combinations**: all permutations of seed word pairs (and triples with `--max-combo 3`)
-
-Two seed words typically produce 10,000–20,000 candidates. This is useful for:
-
-- Testing account lockout thresholds (never run against accounts you don't own)
-- Auditing whether a user's chosen password is derivable from known personal context
-- CTF and lab environments
+Two seed words typically produces ~15,000 candidates.
 
 ---
 
@@ -188,33 +139,31 @@ Two seed words typically produce 10,000–20,000 candidates. This is useful for:
 ```
 passaudit/
 ├── passaudit/
-│   ├── __init__.py       # package init, bundled wordlist loader
-│   ├── analyzer.py       # orchestrates everything into a PasswordReport
-│   ├── entropy.py        # Shannon + pool entropy, crack-time estimation
-│   ├── patterns.py       # keyboard walks, sequences, repeats, dictionary
-│   ├── hibp.py           # k-anonymity HIBP API client
-│   ├── wordlist.py       # candidate password list generator
+│   ├── __init__.py
+│   ├── analyzer.py     # orchestrates report generation
+│   ├── entropy.py      # Shannon + pool entropy calculation
+│   ├── patterns.py     # keyboard walk, sequence, repeat, dictionary detection
+│   ├── hibp.py         # k-anonymity HIBP API client
+│   ├── wordlist.py     # candidate password list generator
 │   └── data/
 │       └── common_words.txt
-├── cli.py                # argparse entry point
+├── cli.py
 ├── requirements.txt
-└── pyproject.toml
+└── .gitignore
 ```
-
----
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | 0 | All passwords scored ≥ 45 |
-| 1 | No passwords provided / argument error |
-| 2 | One or more passwords scored < 45 (useful in CI/pre-commit hooks) |
+| 1 | No input provided |
+| 2 | One or more passwords scored < 45 |
+
+Non-zero exit on weak passwords makes this usable in pre-commit hooks or CI pipelines.
 
 ---
 
-## Limitations
+## Stack
 
-- Crack-time estimates assume offline attacks at 10¹⁰ guesses/second (a reasonable mid-range for fast hash functions like MD5/SHA-1). Against bcrypt or Argon2, real-world times are orders of magnitude longer.
-- The bundled wordlist is intentionally small. For thorough dictionary checks, pass `/usr/share/dict/words` or a SecLists wordlist with `--wordlist`.
-- HIBP checks require an internet connection and are rate-limited. Use `--no-hibp` for bulk offline analysis.
+Python · requests · hashlib · argparse
